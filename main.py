@@ -102,16 +102,16 @@ class Tip(TipBase):
         }
 
 class TopicBase(BaseModel):
-    topic_id: int = Field(..., description="Unique integer ID for the topic", example=1001)
     title: str = Field(..., description="Title of the topic", example="Project Management")
     description: Optional[str] = Field(None, description="Description of the topic", example="Tips and tricks for managing projects effectively")
     display_order: int = Field(default=1, description="Order in which the topic should be displayed", example=1)
 
 class TopicCreate(TopicBase):
+    topic_id: Optional[int] = Field(None, description="Unique integer ID for the topic (optional for creation, required for update)", example=1001)
+
     class Config:
         json_schema_extra = {
             "example": {
-                "topic_id": 1001,
                 "title": "Project Management",
                 "description": "Tips and tricks for managing projects effectively",
                 "display_order": 1
@@ -180,9 +180,36 @@ async def create_or_update_topic(topic: TopicCreate):
     - **description**: Optional description of the topic
     """
     topic_dict = topic.model_dump()
-    existing = await db.topics.find_one({"topic_id": topic.topic_id})
-    
-    if existing:
+    if topic.topic_id:
+        # Check if topic_id exists for update
+        existing = await db.topics.find_one({"topic_id": topic.topic_id})
+        if not existing:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        
+        original_display_order = existing.get("display_order")
+        new_display_order = topic_dict.get("display_order")
+
+        if new_display_order is not None and new_display_order != original_display_order:
+            # Adjust display_order of other topics
+            if new_display_order > original_display_order:
+                # Moving to a higher display_order (down the list)
+                await db.topics.update_many(
+                    {
+                        "topic_id": {"$ne": topic.topic_id},
+                        "display_order": {"$gt": original_display_order, "$lte": new_display_order}
+                    },
+                    {"$inc": {"display_order": -1}}
+                )
+            elif new_display_order < original_display_order:
+                # Moving to a lower display_order (up the list)
+                await db.topics.update_many(
+                    {
+                        "topic_id": {"$ne": topic.topic_id},
+                        "display_order": {"$gte": new_display_order, "$lt": original_display_order}
+                    },
+                    {"$inc": {"display_order": 1}}
+                )
+
         # Update existing topic
         topic_dict["updated_at"] = datetime.utcnow()
         await db.topics.update_one(
@@ -192,11 +219,31 @@ async def create_or_update_topic(topic: TopicCreate):
         updated_topic = await db.topics.find_one({"topic_id": topic.topic_id})
         return Topic(**updated_topic)
     else:
-        # Create new topic
+        # Create new topic with app-generated topic_id
+        # Find the maximum topic_id to assign the next available one
+        max_topic = await db.topics.find_one(
+            {}, sort=[("topic_id", -1)]
+        )
+        next_topic_id = (max_topic["topic_id"] + 1) if max_topic else 1 # Start from 1 if no topics exist
+        
+        topic_dict["topic_id"] = next_topic_id
         topic_dict["created_at"] = datetime.utcnow()
         topic_dict["updated_at"] = datetime.utcnow()
+        
+        # Handle display_order for new topics
+        if "display_order" in topic_dict and topic_dict["display_order"] is not None:
+            # User explicitly provided a display_order, shift existing topics
+            await db.topics.update_many(
+                {"display_order": {"$gte": topic_dict["display_order"]}},
+                {"$inc": {"display_order": 1}}
+            )
+        else:
+            # Assign display_order as the count of existing topics if not provided by user
+            topic_count = await db.topics.count_documents({})
+            topic_dict["display_order"] = topic_count
+
         await db.topics.insert_one(topic_dict)
-        created_topic = await db.topics.find_one({"topic_id": topic.topic_id})
+        created_topic = await db.topics.find_one({"topic_id": next_topic_id})
         return Topic(**created_topic)
 
 @app.get("/api/topics", response_model=List[Topic], tags=["Topics"])
