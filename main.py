@@ -156,7 +156,7 @@ class SearchResult(BaseModel):
     topic_id: Optional[str] = Field(None, description="ID of the parent topic (for tips only)", example="507f1f77bcf86cd799439012")
     topic_title: Optional[str] = Field(None, description="Title of the parent topic (for tips only)", example="Project Management")
     relevance_score: float = Field(..., description="Search relevance score", example=0.95)
-
+ # test123
 
 
 class SearchResponse(BaseModel):
