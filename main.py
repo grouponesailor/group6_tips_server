@@ -157,6 +157,8 @@ class SearchResult(BaseModel):
     topic_title: Optional[str] = Field(None, description="Title of the parent topic (for tips only)", example="Project Management")
     relevance_score: float = Field(..., description="Search relevance score", example=0.95)
 
+
+
 class SearchResponse(BaseModel):
     results: List[SearchResult]
     total_count: int
