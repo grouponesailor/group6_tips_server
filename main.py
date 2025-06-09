@@ -1,16 +1,27 @@
 from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Query, Path
-from pydantic import BaseModel, Field, GetCoreSchemaHandler
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, GetCoreSchemaHandler, model_validator
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import core_schema
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 import os
 from dotenv import load_dotenv
+import random
 
 # Load environment variables
 load_dotenv()
+
+# Placeholder for random icons (you can replace these with actual paths/URLs)
+DEFAULT_ICONS = [
+    "https://api.iconify.design/material-symbols:lightbulb-outline.svg",
+    "https://api.iconify.design/material-symbols:handshake-outline.svg",
+    "https://api.iconify.design/material-symbols:settings-outline.svg",
+    "https://api.iconify.design/material-symbols:support-agent-outline.svg",
+    "https://api.iconify.design/material-symbols:security-outline.svg",
+]
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -20,6 +31,14 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods (GET, POST, PUT, DELETE, etc.)
+    allow_headers=["*"],  # Allows all headers
 )
 
 # MongoDB connection
@@ -105,23 +124,35 @@ class TopicBase(BaseModel):
     title: str = Field(..., description="Title of the topic", example="Project Management")
     description: Optional[str] = Field(None, description="Description of the topic", example="Tips and tricks for managing projects effectively")
     display_order: int = Field(default=1, description="Order in which the topic should be displayed", example=1)
+    isNew: bool = Field(default=True, description="Indicates if the topic is new", example=True)
+    icon: str = Field(default="", description="URL of the topic icon", example="https://example.com/icon.svg")
 
 class TopicCreate(TopicBase):
     topic_id: Optional[int] = Field(None, description="Unique integer ID for the topic (optional for creation, required for update)", example=1001)
+
+    @model_validator(mode='before')
+    @classmethod
+    def set_random_icon_if_none(cls, values):
+        if not values.get('icon'):
+            values['icon'] = random.choice(DEFAULT_ICONS)
+        return values
 
     class Config:
         json_schema_extra = {
             "example": {
                 "title": "Project Management",
                 "description": "Tips and tricks for managing projects effectively",
-                "display_order": 1
+                "display_order": 1,
+                "isNew": True,
+                "icon": ""
             }
         }
 
 class Topic(TopicBase):
+    topic_id: int = Field(..., description="Unique integer ID for the topic", example=1001)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    tips: List[Tip] = Field(default_factory=list)
+    tipCount: int = Field(default=0, description="Number of tips in this topic", example=5)
 
     class Config:
         populate_by_name = True
@@ -132,22 +163,7 @@ class Topic(TopicBase):
                 "description": "Tips and tricks for managing projects effectively",
                 "created_at": "2024-03-15T10:30:00",
                 "updated_at": "2024-03-15T10:30:00",
-                "tips": [
-                    {
-                        "tip_id": 2001,
-                        "title": "How to create a new project",
-                        "description": "To create a new project, click the '+' button in the top right corner...",
-                        "media": {
-                            "type": "image",
-                            "url": "https://example.com/image.jpg",
-                            "alt_text": "Screenshot of the dashboard"
-                        },
-                        "display_order": 1,
-                        "topic_id": 1001,
-                        "created_at": "2024-03-15T10:30:00",
-                        "updated_at": "2024-03-15T10:30:00"
-                    }
-                ]
+                "tipCount": 1
             }
         }
 
@@ -217,6 +233,9 @@ async def create_or_update_topic(topic: TopicCreate):
             {"$set": topic_dict}
         )
         updated_topic = await db.topics.find_one({"topic_id": topic.topic_id})
+        # Calculate tipCount for the updated topic
+        tip_count = await db.tips.count_documents({"topic_id": updated_topic["topic_id"]})
+        updated_topic["tipCount"] = tip_count
         return Topic(**updated_topic)
     else:
         # Create new topic with app-generated topic_id
@@ -242,20 +261,35 @@ async def create_or_update_topic(topic: TopicCreate):
             topic_count = await db.topics.count_documents({})
             topic_dict["display_order"] = topic_count
 
+        # Debugging: Print topic_dict before insertion to check icon value
+        print(f"Topic dict before insertion: {topic_dict}")
+
         await db.topics.insert_one(topic_dict)
         created_topic = await db.topics.find_one({"topic_id": next_topic_id})
+        # Initialize tipCount for the new topic
+        created_topic["tipCount"] = 0
         return Topic(**created_topic)
 
 @app.get("/api/topics", response_model=List[Topic], tags=["Topics"])
 async def get_topics():
-    topics = await db.topics.find().sort("display_order", 1).to_list(length=None)
-    return [Topic(**t) for t in topics]
+    topics_cursor = db.topics.find().sort("display_order", 1)
+    topics_list = []
+    async for t in topics_cursor:
+        tip_count = await db.tips.count_documents({"topic_id": t["topic_id"]})
+        t["tipCount"] = tip_count
+        topics_list.append(Topic(**t))
+    return topics_list
 
 @app.get("/api/topics/{topic_id}", response_model=Topic, tags=["Topics"])
 async def get_topic(topic_id: int = Path(..., description="The topic_id of the topic to retrieve")):
     topic = await db.topics.find_one({"topic_id": topic_id})
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
+    
+    # Calculate tipCount for the retrieved topic
+    tip_count = await db.tips.count_documents({"topic_id": topic["topic_id"]})
+    topic["tipCount"] = tip_count
+    
     return Topic(**topic)
 
 @app.delete("/api/topics/{topic_id}", status_code=204, tags=["Topics"])
@@ -372,6 +406,14 @@ async def delete_tip(tip_id: int = Path(..., description="The tip_id of the tip 
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Tip not found")
 
+@app.get("/api/tips", response_model=List[Tip], tags=["Tips"])
+async def get_all_tips():
+    """
+    Retrieve a list of all tips, sorted by display_order.
+    """
+    tips = await db.tips.find().sort("display_order", 1).to_list(length=None)
+    return [Tip(**t) for t in tips]
+
 @app.get("/api/search", response_model=SearchResponse, tags=["Search"])
 async def search(
     q: str = Query(..., description="Search query string"),
@@ -415,7 +457,7 @@ async def search(
             relevance = 1.0
         elif title_match > 0:  # Match in title
             relevance = 0.8
-        elif desc_match >= 0:  # Match in description
+        elif desc_match >= 0:  # Match iFn description
             relevance = 0.6
             
         results.append(SearchResult(
@@ -436,7 +478,7 @@ async def search(
             relevance = 1.0
         elif title_match > 0:  # Match in title
             relevance = 0.8
-        elif desc_match >= 0:  # Match in description
+        elif desc_match >= 0:  # Match iFn description
             relevance = 0.6
             
         results.append(SearchResult(
