@@ -292,6 +292,32 @@ async def create_or_update_tip(tip: TipCreate):
         if not existing:
             raise HTTPException(status_code=404, detail="Tip not found")
         
+        original_display_order = existing.get("display_order")
+        new_display_order = tip_dict.get("display_order")
+
+        if new_display_order is not None and new_display_order != original_display_order:
+            # Adjust display_order of other tips within the same topic
+            if new_display_order > original_display_order:
+                # Moving to a higher display_order (down the list)
+                await db.tips.update_many(
+                    {
+                        "topic_id": tip.topic_id,
+                        "tip_id": {"$ne": tip.tip_id},
+                        "display_order": {"$gt": original_display_order, "$lte": new_display_order}
+                    },
+                    {"$inc": {"display_order": -1}}
+                )
+            elif new_display_order < original_display_order:
+                # Moving to a lower display_order (up the list)
+                await db.tips.update_many(
+                    {
+                        "topic_id": tip.topic_id,
+                        "tip_id": {"$ne": tip.tip_id},
+                        "display_order": {"$gte": new_display_order, "$lt": original_display_order}
+                    },
+                    {"$inc": {"display_order": 1}}
+                )
+
         tip_dict["updated_at"] = datetime.utcnow()
         await db.tips.update_one(
             {"tip_id": tip.tip_id},
@@ -308,6 +334,22 @@ async def create_or_update_tip(tip: TipCreate):
         tip_dict["tip_id"] = new_tip_id
         tip_dict["created_at"] = datetime.utcnow()
         tip_dict["updated_at"] = datetime.utcnow()
+        
+        # Handle display_order for new tips
+        if "display_order" in tip_dict and tip_dict["display_order"] is not None:
+            # User explicitly provided a display_order, shift existing tips in this topic
+            await db.tips.update_many(
+                {
+                    "topic_id": tip.topic_id,
+                    "display_order": {"$gte": tip_dict["display_order"]}
+                },
+                {"$inc": {"display_order": 1}}
+            )
+        else:
+            # Assign display_order as the count of existing tips in this topic if not provided by user
+            tip_count = await db.tips.count_documents({"topic_id": tip.topic_id})
+            tip_dict["display_order"] = tip_count
+
         await db.tips.insert_one(tip_dict)
         created_tip = await db.tips.find_one({"tip_id": new_tip_id})
         return Tip(**created_tip)
